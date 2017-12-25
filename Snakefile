@@ -35,8 +35,8 @@ rule jellyfish:
 		# jellyfish can swamp home directory
 		base=`pwd`
 		cd {outDir}/reads/jellyfish
-		jellyfish count -t 12 -C -m 19 -s 5G  -o 40360_out <(zcat {input})
-		jellyfish histo -o 40360.txt 40360_out && rm 40360_out
+		jellyfish count -t 12 -C -m 19 -s 5G  -o {wildcards.sample}_out <(zcat {input})
+		jellyfish histo -o {wildcards.sample}.txt {wildcards.sample}_out && rm {wildcards.sample}_out
 		"""
 
 rule fastqc:
