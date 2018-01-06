@@ -172,7 +172,7 @@ rule discoMapBT:
 		run_VCF_creator.sh -f filteredBT.sam -o {output}
 		"""
 
-def validate(refFile, outFileName, inFileName):
+def validate(refFile, inFileName, outFileName ):
 	# validates results of discoSNP mapping and creates a filtered vcf
 	from Bio import SeqIO
 	import pdb
@@ -208,13 +208,13 @@ rule discoValidate:
 	input: rules.discoMap.output
 	output: outDir + "/discoSNP/disco.validated.vcf"
 	run:
-		validate(clivBWAindex, input[1], output[0])
+		validate(clivBWAindex, input[0], output[0])
 
 rule discoValidateBT:
 	input: rules.discoMapBT.output
 	output: outDir + "/discoSNP/discoBT.validated.vcf"
 	run:
-		validate(btpBWAindex, input[1], output[0])
+		validate(btpBWAindex, input[0], output[0])
 
 #filter results to remove sited more than 3*sd above the mean coverage, and anything with other than a PASS flag
 rule discoFinal:
@@ -259,12 +259,26 @@ rule discoStats:
 		"""
 
 rule TsTv:
-	input: rules.discoFinal.output
-	outfile: outDir + "/reports/TsTv.txt"
+	input: 
+		RP = rules.discoFinal.output,
+		BT = rules.discoValidateBT.output
+	output: 
+		RP = outDir + "/reports/TsTv_RP.txt",
+		BT = outDir + "/reports/TsTv_BT.txt"
 	shell:
 		"""
 		module load vcftools
-		paste <(vcftools --vcf {input} --non-ref-af .01 --TsTv-summary --indv G1 --indv G2  --stdout) <(vcftools --vcf {input} --non-ref-af .01 --TsTv-summary --indv G3 --indv G4  --stdout | cut -f2 ) | sed '1cMODEL\\tPP\\tBT' > {outfile}
+		# collect Ts and Tv data for SNPs that have some difference from ancestor
+		paste \
+		<(vcftools --vcf {input.RP} --non-ref-af .01 --TsTv-summary --indv G1 --indv G2  --stdout) \
+		<(vcftools --vcf {input.RP} --non-ref-af .01 --TsTv-summary --indv G3 --indv G4  --stdout | cut -f2 ) | \
+		sed '1cMODEL\\tPP\\tBT' > {output.RP} && [[ -s {output.RP} ]]
+
+		# calculate TsTv ratios for SNPs that all mapped to the BT reference
+		paste \
+		<(vcftools --vcf {input.BT} --max-missing 1 --recode --stdout | vcftools --vcf - --non-ref-af .01 --TsTv-summary --indv G1 --indv G2 --stdout) \
+		<(vcftools --vcf {input.BT} --max-missing 1 --recode --stdout | vcftools --vcf -  --non-ref-af .01 --TsTv-summary --indv G3 --indv G4 --stdout | cut -f2) | \
+		sed '1cMODEL\\tPP\\tBT' > {output.BT} && [[ -s {output.BT} ]]
 		"""
 
 # # determine which SNPs are fixed and which are polymorphic
