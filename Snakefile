@@ -248,16 +248,31 @@ rule snpEff:
 rule discoStats:
 	input: rules.snpEff.output
 	output: 
-		SvsN = outDir + "/discoSNP/stats/SvsN.txt",
-		FvsP = outDir + "/discoSNP/stats/FvsP.txt"
-	params: outdir = outDir + "/discoSNP/stats"
+		PPMK = outDir + "/reports/PP_MK.txt",
+		BPMK = outDir + "/reports/BP_MK.txt",
+		PPpi = outDir + "/reports/PP_pi.txt",
+		BPpi = outDir + "/reports/BP_pi.txt",
+		PPfreq = outDir + "/reports/PP_freq.txt",
+		BPfreq = outDir + "/reports/BP_freq.txt"
 	shell:
 		"""
 		module load vcftools
-		awk -v OFS="\\t" '$8~/synonymous_variant/ {{print $1,$2,"S"}} $8~/missense_variant/ {{print $1,$2,"N"}}' {input} > {output.SvsN} && [[ -s {output.SvsN} ]]
-		paste <(vcftools --vcf {input} --indv G1 --indv G2 --freq2 --stdout | cut -f 1,2,5 | sed 1d) <(vcftools --vcf {input} --indv G3 --indv G4 --freq2 --stdout | cut -f 5 | sed 1d)  | awk -v OFS="\\t" '($3~/\\./) || ($4~/\\./) {{print $1,$2,"P"; next}} {{print $1,$2,"F"}}' > {output.FvsP} && [[ -s {output.FvsP} ]]
+		vcftools --vcf {input} --recode-INFO-all --indv G1 --indv G2 --non-ref-af .01 --recode --stdout | \
+		awk -v OFS="\\t" '$8~/synonymous_variant/ {{print $1,$2,"S"}} $8~/missense_variant/ {{print $1,$2,"N"}}' > {output.PPMK} && [[ -s {output.PPMK} ]]
+
+		vcftools --vcf {input} --recode-INFO-all --indv G3 --indv G4 --non-ref-af .01 --recode --stdout | \
+		awk -v OFS="\\t" '$8~/synonymous_variant/ {{print $1,$2,"S"}} $8~/missense_variant/ {{print $1,$2,"N"}}' > {output.BPMK} && [[ -s {output.BPMK} ]]
+
+		vcftools --vcf {input} --indv G1 --indv G2 --site-pi --stdout > {output.PPpi} && [[ -s {output.PPpi} ]]
+
+		vcftools --vcf {input} --indv G3 --indv G4 --site-pi --stdout > {output.BPpi} && [[ -s {output.BPpi} ]]
+
+		vcftools --vcf {input} --indv G1 --indv G2 --freq2 --stdout > {output.PPfreq} && [[ -s {output.PPfreq} ]]
+
+		vcftools --vcf {input} --indv G3 --indv G4 --freq2 --stdout > {output.BPfreq} && [[ -s {output.BPfreq} ]]
 		"""
 
+# compare TsTv for reads mapped to rock pigeon vs band-tailed pigeon
 rule TsTv:
 	input: 
 		RP = rules.discoFinal.output,
@@ -274,35 +289,12 @@ rule TsTv:
 		<(vcftools --vcf {input.RP} --non-ref-af .01 --TsTv-summary --indv G3 --indv G4  --stdout | cut -f2 ) | \
 		sed '1cMODEL\\tPP\\tBT' > {output.RP} && [[ -s {output.RP} ]]
 
-		# calculate TsTv ratios for SNPs that all mapped to the BT reference
+		# calculate TsTv ratios for SNPs that all mapped to the BT reference, without missing data
 		paste \
 		<(vcftools --vcf {input.BT} --max-missing 1 --recode --stdout | vcftools --vcf - --non-ref-af .01 --TsTv-summary --indv G1 --indv G2 --stdout) \
 		<(vcftools --vcf {input.BT} --max-missing 1 --recode --stdout | vcftools --vcf -  --non-ref-af .01 --TsTv-summary --indv G3 --indv G4 --stdout | cut -f2) | \
 		sed '1cMODEL\\tPP\\tBT' > {output.BT} && [[ -s {output.BT} ]]
 		"""
 
-# # determine which SNPs are fixed and which are polymorphic
-# # for this we remove the outgroup and compute frequencies
-# rule fixedPolymorphic:	
-# 	input: rules.consensusFilter.output
-# 	output: "../data/popgen/var/snps.csv"
-# 	shell: """module load zlib; vcftools --vcf {input} --remove-indv Pflavoviridis --freq; \
-#     awk -v OFS="," ' NR>1 {{split($5,a,":"); if((a[2]=="1") || (a[2]=="0")) state="F"; else state="P"; print $1,$2,state}}' out.frq > {output} """
-
-# # exports silent and replacement sites from snpEff
-# rule parseSilentReplacement:
-# 	input: rules.filterLongest.output, rules.snpEff.output
-# 	output: "../data/popgen/var/annotation.csv"
-# 	shell: ". ~/python2/bin/activate ; python parse_silentReplacement.py {input} > {output}"
-
-# # calculate how many synonymous vs_non-synonymous changes are possible
-# rule silentReplacement:
-# 	input: rules.filterLongest.output
-# 	output: "../data/popgen/var/silentReplacement.csv"
-# 	shell: ". ~/python2/bin/activate; python silent_replacement.py {input} > {output}"
-
-
-
-
 rule all:
-	input: outDir + "/reports/TsTv.txt"
+	input: outDir + "/reports/TsTv_RP.txt", outDir + "/reports/PP_MK.txt"
