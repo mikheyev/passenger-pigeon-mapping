@@ -9,7 +9,7 @@ SCRATCH = "/work/scratch/sasha"
 clivBWAindex = outDir + "/../ref/GCA_000337935.2_Cliv_2.1_genomic.fna" # rock dove reference
 btpBWAindex = outDir + "/../ref/GCA_002029285.1_NIATT_ARIZONA_genomic.fna" # band-tailed pigeon reference
 
-localrules: combineJellyfish, discoSplit, discoMerge, discoValidate, discoValidateBT, discoFinal, discoStats, TsTv
+localrules: combineJellyfish, discoSplit, discoMerge, discoValidate, discoValidateBT, discoFinal, discoStats, TsTv, combineStats, windowAverage
 
 rule trim:
 	input:
@@ -174,8 +174,6 @@ rule discoMapBT:
 
 def validate(refFile, inFileName, outFileName ):
 	# validates results of discoSNP mapping and creates a filtered vcf
-	from Bio import SeqIO
-	import pdb
 	seqs = SeqIO.to_dict(SeqIO.parse(refFile, "fasta"))
 	outfile = open(outFileName, "w")
 	badSites = set()
@@ -232,6 +230,22 @@ rule discoFinal:
 		vcftools --vcf {input} --remove-filtered-all --max-meanDP $cutoff --recode --stdout > {output} && [[ -s {output} ]]
 		"""
 
+#filter results to remove sited more than 3*sd above the mean coverage, and anything with other than a PASS flag
+rule discoFinalBT:
+	input: rules.discoValidateBT.output
+	output: outDir + "/discoSNP/discoBT.final.vcf"
+	shell:
+		"""
+		module load vcftools
+		function mean_sd () {{
+				awk '{{x[NR]=$0; s+=$0; n++}} END{{a=s/n; for (i in x){{ss += (x[i]-a)^2}} sd = sqrt(ss/n); print s/n,sd}}'
+				}}
+		stats=( $(cat {input} | vcftools --vcf - --max-missing 1 --recode --stdout | awk '$1!~/^#/ {{sum=0; for(i=10;i<=NF;i++) {{split($i,a,":"); sum+=a[2]}}; print sum/4}}' | mean_sd ) )
+		echo DP mean: ${{stats[0]}} DP stdev: ${{stats[1]}}
+		cutoff=$(python -c "from math import ceil; print(int(ceil(${{stats[0]}} +  3 * ${{stats[1]}})))")
+		vcftools --vcf {input} --remove-filtered-all --max-missing 1 --max-meanDP $cutoff --recode --stdout > {output} && [[ -s {output} ]]
+		"""
+
 #snpEff using a pre-built database from gff3
 rule snpEff:
 	input: rules.discoFinal.output
@@ -241,6 +255,16 @@ rule snpEff:
 		"""
 		java -Xmx7g -jar /apps/free/snpeff/4.3g/snpEff.jar -c /apps/unit/MikheyevU/sasha/snpEff4/snpEff.config -no-utr -no-upstream -no-intron -no-intergenic -no-downstream cliv_2.1 {input} > {output} && [[ -s {output} ]]
 		"""
+
+rule snpEffBT:
+	input: rules.discoFinalBT.output
+	output: outDir + "/discoSNP/discoBT.annotated.vcf"
+	resources: mem=10, time = 60*24
+	shell:
+		"""
+		java -Xmx7g -jar /apps/free/snpeff/4.3g/snpEff.jar -c /apps/unit/MikheyevU/sasha/snpEff4/snpEff.config -no-utr -no-upstream -no-intron -no-intergenic -no-downstream btp {input} > {output} && [[ -s {output} ]]
+		"""
+
 
 # compute various stats from discoSNP data
 #G1,G2 are PP 34.3.23.2 and 40360
@@ -267,10 +291,41 @@ rule discoStats:
 
 		vcftools --vcf {input} --indv G3 --indv G4 --site-pi --stdout > {output.BPpi} && [[ -s {output.BPpi} ]]
 
-		vcftools --vcf {input} --indv G1 --indv G2 --freq2 --stdout > {output.PPfreq} && [[ -s {output.PPfreq} ]]
+		vcftools --vcf {input} --indv G1 --indv G2 --freq2 --stdout | cut -f-5 > {output.PPfreq} && [[ -s {output.PPfreq} ]]
 
-		vcftools --vcf {input} --indv G3 --indv G4 --freq2 --stdout > {output.BPfreq} && [[ -s {output.BPfreq} ]]
+		vcftools --vcf {input} --indv G3 --indv G4 --freq2 --stdout | cut -f-5 > {output.BPfreq} && [[ -s {output.BPfreq} ]]
 		"""
+
+# combine the various selection stats
+rule combineStats:
+	input:
+		PPMK = outDir + "/reports/PP_MK.txt",
+		BPMK = outDir + "/reports/BP_MK.txt",
+		PPpi = outDir + "/reports/PP_pi.txt",
+		BPpi = outDir + "/reports/BP_pi.txt",
+		PPfreq = outDir + "/reports/PP_freq.txt",
+		BPfreq = outDir + "/reports/BP_freq.txt"
+	output:
+		pi = outDir + "/reports/pi.csv",
+		PPMK = outDir + "/reports/PP_MK.csv",
+		BPMK = outDir + "/reports/BP_MK.csv"
+	run:
+		R("""
+			library(tidyverse)
+			left_join(read_tsv("{input.PPpi}"), read_tsv("{input.BPpi}"), by = c("CHROM" = "CHROM", "POS" = "POS")) %>% rename(PPpi = PI.x , BPpi = PI.y) %>% write_csv( path="{output.pi}")
+			left_join(read_tsv("{input.PPMK}", col_names=c("CHROM", "POS", "type")),
+                  read_tsv("{input.PPfreq}", 
+                           col_names=c("CHROM", "POS", "N_ALLELES", "N_CHR","freq"), skip = 1),
+                   by =  c("CHROM" = "CHROM", "POS" = "POS")) %>% select(-(4:5)) %>%
+    			mutate(poly = ifelse(freq > 0 & freq < 1, "P", "D")) %>% 
+    			mutate(variant = paste0(poly, type)) %>% write_csv(path = "{output.PPMK}")
+    		left_join(read_tsv("{input.BPMK}", col_names=c("CHROM", "POS", "type")),
+                  read_tsv("{input.BPfreq}", 
+                           col_names=c("CHROM", "POS", "N_ALLELES", "N_CHR","freq"), skip = 1),
+                   by =  c("CHROM" = "CHROM", "POS" = "POS")) %>% select(-(4:5)) %>%
+			    mutate(poly = ifelse(freq > 0 & freq < 1, "P", "D")) %>% 
+    			mutate(variant = paste0(poly, type)) %>% write_csv(path = "{output.BPMK}")
+    		""")
 
 # compare TsTv for reads mapped to rock pigeon vs band-tailed pigeon
 rule TsTv:
@@ -297,4 +352,4 @@ rule TsTv:
 		"""
 
 rule all:
-	input: outDir + "/reports/TsTv_RP.txt", outDir + "/reports/PP_MK.txt"
+	input: outDir + "/reports/TsTv_RP.txt", outDir + "/reports/pi.csv"
