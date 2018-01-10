@@ -9,7 +9,7 @@ SCRATCH = "/work/scratch/sasha"
 clivBWAindex = outDir + "/../ref/GCA_000337935.2_Cliv_2.1_genomic.fna" # rock dove reference
 btpBWAindex = outDir + "/../ref/GCA_002029285.1_NIATT_ARIZONA_genomic.fna" # band-tailed pigeon reference
 
-localrules: combineJellyfish, discoSplit, discoMerge, discoValidate, discoValidateBT, discoFinal, discoStats, TsTv, combineStats, windowAverage
+localrules: combineJellyfish, discoSplit, discoMerge, discoValidate, discoFinal, discoStats, TsTv, combineStats
 
 rule trim:
 	input:
@@ -106,70 +106,22 @@ rule discoSNP:
 		run_discoSnp++.sh -u -t -l -r fof.txt
 		"""
 
-# filter out sites with missing values from the fasta, and output them as tab-delimited
-rule filterDisco:
-	input: rules.discoSNP.output
-	output: outDir + "/discoSNP/filtered.txt"
-	threads: 1
-	resources: mem=80, time=60*24
-	run:
-		keep = set([])
-		with open(input[0]) as vcf:
-			for line in vcf:
-				if line[0] != "#":
-					count = 0
-					for rec in line.split("\t")[9:]:						
-						if rec[:3] == "./.":
-							count += 1
-						if count > 0:   #legacy
-							break
-					else:
-						keep.add(line.split("\t")[0].split("_")[-1]) #add variant id
-
-		records = defaultdict(dict)
-		with open(output[0], "w") as f:
-			for seq in SeqIO.parse(open(input[1]),'fasta'):
-				uniqueId = seq.id.split("|")[0].split("_")[-1]
-				path = seq.id.split("|")[0].split("_")[1]
-				# keep SNPs that have low missingness
-				if seq.id[:3] == "SNP" and uniqueId in keep:
-					records[uniqueId][path] = seq
-			# verify that records are printed paired
-			for seq in records:
-				if "higher" in records[seq] and "lower" in records[seq]:
-					f.write(">{}\t{}\t>{}\t{}\n".format(records[seq]["higher"].id, str(records[seq]["higher"].seq), records[seq]["lower"].id, str(records[seq]["lower"].seq)))
-
-
-# map kmers onto Rock pigeon genome
+# map kmers onto pigeon genomes
 # keep only uniquely mapped reads https://bioinformatics.stackexchange.com/questions/508/obtaining-uniquely-mapped-reads-from-bwa-mem-alignment
 rule discoMap:
-	input: rules.filterDisco.output
-	output: outDir + "/discoSNP/disco.vcf"
-	threads: 12
-	resources: mem=20, time=60*24*2
-	params: discoDir = outDir + "/discoSNP"
-	shell: 
-		"""
-		module load miniconda DiscoSnp/2.3.0 samtools
-		cd {params.discoDir}
-		sed 's/\\t/\\n/g' {input} > filtered.fa
-		bwa samse {clivBWAindex} <(bwa aln -t {threads} {clivBWAindex} filtered.fa) filtered.fa |  awk '$0~/^@/ {{print; next}} {{line1=$0; getline; if(match(line1""$0, "XA:Z") == 0 ) print line1"\\n"$0}}' > filtered.sam 
-		run_VCF_creator.sh -f filtered.sam -o {output}
-		"""
-
-
-rule discoMapBT:
 	input: rules.discoSNP.output[1]
-	output: outDir + "/discoSNP/discoBT.vcf"
+	output: outDir + "/discoSNP/mapped/{species}.vcf"
 	threads: 12
 	resources: mem=20, time=60*24*2
-	params: discoDir = outDir + "/discoSNP"
+	params: 
+		discoDir = outDir + "/discoSNP",
+		index = lambda wildcards: clivBWAindex if wildcards.species == "RP" else btpBWAindex
 	shell: 
 		"""
 		module load miniconda DiscoSnp/2.3.0 samtools
 		cd {params.discoDir}
-		bwa samse {btpBWAindex} <(bwa aln -t {threads} {btpBWAindex} {input}) {input} |  awk '$0~/^@/ {{print; next}} {{line1=$0; getline; if(match(line1""$0, "XA:Z") == 0 ) print line1"\\n"$0}}' | grep -v "INDEL" > filteredBT.sam 
-		run_VCF_creator.sh -f filteredBT.sam -o {output}
+		bwa samse {params.index} <(bwa aln -t {threads} {params.index} {input}) {input} |  awk '$0~/^@/ {{print; next}} {{line1=$0; getline; if(match(line1""$0, "XA:Z") == 0 ) print line1"\\n"$0}}' | grep -v "INDEL" > filtered{wildcards.species}.sam 
+		run_VCF_creator.sh -f filtered{wildcards.species}.sam -o {output}
 		"""
 
 def validate(refFile, inFileName, outFileName ):
@@ -204,65 +156,42 @@ def validate(refFile, inFileName, outFileName ):
 # verify that reference positions match, and eliminate any sites that have multiple
 rule discoValidate:
 	input: rules.discoMap.output
-	output: outDir + "/discoSNP/disco.validated.vcf"
+	output: outDir + "/discoSNP/validated/{species}.vcf"
+	params: index = lambda wildcards: clivBWAindex if wildcards.species == "RP" else btpBWAindex
 	run:
-		validate(clivBWAindex, input[0], output[0])
+		validate(params.index, input[0], output[0])
 
-rule discoValidateBT:
-	input: rules.discoMapBT.output
-	output: outDir + "/discoSNP/discoBT.validated.vcf"
-	run:
-		validate(btpBWAindex, input[0], output[0])
+# rule discoValidateBT:
+# 	input: rules.discoMapBT.output
+# 	output: outDir + "/discoSNP/discoBT.validated.vcf"
+# 	run:
+# 		validate(btpBWAindex, input[0], output[0])
 
 #filter results to remove sited more than 3*sd above the mean coverage, and anything with other than a PASS flag
 rule discoFinal:
 	input: rules.discoValidate.output
-	output: outDir + "/discoSNP/disco.final.vcf"
+	output: outDir + "/discoSNP/final/{species}.vcf"
 	shell:
 		"""
 		module load vcftools
 		function mean_sd () {{
 				awk '{{x[NR]=$0; s+=$0; n++}} END{{a=s/n; for (i in x){{ss += (x[i]-a)^2}} sd = sqrt(ss/n); print s/n,sd}}'
 				}}
-		stats=( $(awk '$1!~/^#/ {{sum=0; for(i=10;i<=NF;i++) {{split($i,a,":"); sum+=a[2]}}; print sum/4}}' {input} | mean_sd ) )
+		stats=( $(vcftools --vcf {input} --max-missing 1 --recode --stdout | awk '$1!~/^#/ {{sum=0; for(i=10;i<=NF;i++) {{split($i,a,":"); sum+=a[2]}}; print sum/4}}' | mean_sd ) )
 		echo DP mean: ${{stats[0]}} DP stdev: ${{stats[1]}}
 		cutoff=$(python -c "from math import ceil; print(int(ceil(${{stats[0]}} +  3 * ${{stats[1]}})))")
-		vcftools --vcf {input} --remove-filtered-all --max-meanDP $cutoff --recode --stdout > {output} && [[ -s {output} ]]
-		"""
-
-#filter results to remove sited more than 3*sd above the mean coverage, and anything with other than a PASS flag
-rule discoFinalBT:
-	input: rules.discoValidateBT.output
-	output: outDir + "/discoSNP/discoBT.final.vcf"
-	shell:
-		"""
-		module load vcftools
-		function mean_sd () {{
-				awk '{{x[NR]=$0; s+=$0; n++}} END{{a=s/n; for (i in x){{ss += (x[i]-a)^2}} sd = sqrt(ss/n); print s/n,sd}}'
-				}}
-		stats=( $(cat {input} | vcftools --vcf - --max-missing 1 --recode --stdout | awk '$1!~/^#/ {{sum=0; for(i=10;i<=NF;i++) {{split($i,a,":"); sum+=a[2]}}; print sum/4}}' | mean_sd ) )
-		echo DP mean: ${{stats[0]}} DP stdev: ${{stats[1]}}
-		cutoff=$(python -c "from math import ceil; print(int(ceil(${{stats[0]}} +  3 * ${{stats[1]}})))")
-		vcftools --vcf {input} --remove-filtered-all --max-missing 1 --max-meanDP $cutoff --recode --stdout > {output} && [[ -s {output} ]]
+		vcftools --vcf {input} --max-missing 1 --remove-filtered-all --max-meanDP $cutoff --recode --stdout > {output} && [[ -s {output} ]]
 		"""
 
 #snpEff using a pre-built database from gff3
 rule snpEff:
 	input: rules.discoFinal.output
-	output: outDir + "/discoSNP/disco.annotated.vcf"
+	output: outDir + "/discoSNP/annotated/{species}.vcf"
 	resources: mem=10, time = 60*24
+	params: index = lambda wildcards: "cliv_2.1" if wildcards.species == "RP" else "btp"
 	shell:
 		"""
-		java -Xmx7g -jar /apps/free/snpeff/4.3g/snpEff.jar -c /apps/unit/MikheyevU/sasha/snpEff4/snpEff.config -no-utr -no-upstream -no-intron -no-intergenic -no-downstream cliv_2.1 {input} > {output} && [[ -s {output} ]]
-		"""
-
-rule snpEffBT:
-	input: rules.discoFinalBT.output
-	output: outDir + "/discoSNP/discoBT.annotated.vcf"
-	resources: mem=10, time = 60*24
-	shell:
-		"""
-		java -Xmx7g -jar /apps/free/snpeff/4.3g/snpEff.jar -c /apps/unit/MikheyevU/sasha/snpEff4/snpEff.config -no-utr -no-upstream -no-intron -no-intergenic -no-downstream btp {input} > {output} && [[ -s {output} ]]
+		java -Xmx7g -jar /apps/free/snpeff/4.3g/snpEff.jar -c /apps/unit/MikheyevU/sasha/snpEff4/snpEff.config -no-utr -no-upstream -no-intron -no-intergenic -no-downstream {params.index} {input} > {output} && [[ -s {output} ]]
 		"""
 
 
@@ -270,14 +199,14 @@ rule snpEffBT:
 #G1,G2 are PP 34.3.23.2 and 40360
 #G3,G4 are BT AMNH_DOT_14025 and BTP2013
 rule discoStats:
-	input: rules.snpEff.output
+	input: outDir + "/discoSNP/annotated/{species}.vcf"
 	output: 
-		PPMK = outDir + "/reports/PP_MK.txt",
-		BPMK = outDir + "/reports/BP_MK.txt",
-		PPpi = outDir + "/reports/PP_pi.txt",
-		BPpi = outDir + "/reports/BP_pi.txt",
-		PPfreq = outDir + "/reports/PP_freq.txt",
-		BPfreq = outDir + "/reports/BP_freq.txt"
+		PPMK = outDir + "/reports/{species}/PP_MK.txt",
+		BPMK = outDir + "/reports/{species}/BP_MK.txt",
+		PPpi = outDir + "/reports/{species}/PP_pi.txt",
+		BPpi = outDir + "/reports/{species}/BP_pi.txt",
+		PPfreq = outDir + "/reports/{species}/PP_freq.txt",
+		BPfreq = outDir + "/reports/{species}/BP_freq.txt"
 	shell:
 		"""
 		module load vcftools
@@ -299,16 +228,16 @@ rule discoStats:
 # combine the various selection stats
 rule combineStats:
 	input:
-		PPMK = outDir + "/reports/PP_MK.txt",
-		BPMK = outDir + "/reports/BP_MK.txt",
-		PPpi = outDir + "/reports/PP_pi.txt",
-		BPpi = outDir + "/reports/BP_pi.txt",
-		PPfreq = outDir + "/reports/PP_freq.txt",
-		BPfreq = outDir + "/reports/BP_freq.txt"
+		PPMK = outDir + "/reports/{species}/PP_MK.txt",
+		BPMK = outDir + "/reports/{species}/BP_MK.txt",
+		PPpi = outDir + "/reports/{species}/PP_pi.txt",
+		BPpi = outDir + "/reports/{species}/BP_pi.txt",
+		PPfreq = outDir + "/reports/{species}/PP_freq.txt",
+		BPfreq = outDir + "/reports/{species}/BP_freq.txt"
 	output:
-		pi = outDir + "/reports/pi.csv",
-		PPMK = outDir + "/reports/PP_MK.csv",
-		BPMK = outDir + "/reports/BP_MK.csv"
+		pi = outDir + "/reports/{species}/pi.csv",
+		PPMK = outDir + "/reports/{species}/PP_MK.csv",
+		BPMK = outDir + "/reports/{species}/BP_MK.csv"
 	run:
 		R("""
 			library(tidyverse)
@@ -330,8 +259,8 @@ rule combineStats:
 # compare TsTv for reads mapped to rock pigeon vs band-tailed pigeon
 rule TsTv:
 	input: 
-		RP = rules.discoFinal.output,
-		BT = rules.discoValidateBT.output
+		RP = outDir + "/discoSNP/annotated/RP.vcf",
+		BT = outDir + "/discoSNP/annotated/BP.vcf"
 	output: 
 		RP = outDir + "/reports/TsTv_RP.txt",
 		BT = outDir + "/reports/TsTv_BT.txt"
@@ -346,10 +275,10 @@ rule TsTv:
 
 		# calculate TsTv ratios for SNPs that all mapped to the BT reference, without missing data
 		paste \
-		<(vcftools --vcf {input.BT} --max-missing 1 --recode --stdout | vcftools --vcf - --non-ref-af .01 --TsTv-summary --indv G1 --indv G2 --stdout) \
-		<(vcftools --vcf {input.BT} --max-missing 1 --recode --stdout | vcftools --vcf -  --non-ref-af .01 --TsTv-summary --indv G3 --indv G4 --stdout | cut -f2) | \
+		<(vcftools --vcf {input.BT} --non-ref-af .01 --TsTv-summary --indv G1 --indv G2 --stdout) \
+		<(vcftools --vcf {input.BT} --non-ref-af .01 --TsTv-summary --indv G3 --indv G4 --stdout | cut -f2) | \
 		sed '1cMODEL\\tPP\\tBT' > {output.BT} && [[ -s {output.BT} ]]
 		"""
 
 rule all:
-	input: outDir + "/reports/TsTv_RP.txt", outDir + "/reports/pi.csv"
+	input: outDir + "/reports/TsTv_RP.txt", expand(outDir + "/reports/{species}/pi.csv", species = ["RP", "BT"])
